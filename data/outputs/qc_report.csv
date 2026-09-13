@@ -1,0 +1,10 @@
+Theme,flag_empty,flag_too_short,flag_duplicate_verbatim,flag_near_identical_cross_respondent,quarantined,n_segments,quarantine_rate
+BrandRecall,0,34,0,169,203,1400,0.145
+Credibility,0,0,0,36,36,1400,0.026
+Enjoyment,0,0,0,16,16,1400,0.011
+Involvement,0,0,0,34,34,1400,0.024
+Memory,0,0,0,16,16,1400,0.011
+Optimisation,0,0,0,84,84,1400,0.06
+Persuasion,0,0,0,195,195,1400,0.139
+Relevance,0,0,0,66,66,1400,0.047
+Understanding,0,0,0,84,84,1400,0.06

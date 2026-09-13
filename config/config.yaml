@@ -1,0 +1,322 @@
+# Project LISTEN — pipeline configuration
+# Edit anchors freely; everything else has sensible defaults.
+
+random_seed: 42
+
+ingest:
+  input_path: "data/dummy_data.xlsx"
+  sheet_name: "Sheet1"
+
+# ---------------------------------------------------------------------------
+# Which survey questions ("themes") were actually fielded in THIS study.
+# Set enabled: false for a theme this wave never asked — ingest.py will
+# stop requiring its source column(s), segment.py will stop emitting rows
+# for it, and any construct mapped to it (see features.theme_construct_map
+# below) will be auto-skipped with a warning rather than erroring.
+#
+# Every study needs at least one enabled theme.
+# ---------------------------------------------------------------------------
+segment:
+  themes:
+    Memory:
+      enabled: true
+      source_columns:
+        - "Memory response - what happened"
+    Meaning:
+      enabled: true
+      source_columns:
+        - "Meaning response - what the ad was saying"
+    Emotion:
+      enabled: true
+      source_columns:
+        - "Emotion response - feeling and why"
+    Optimisation:
+      enabled: true
+      source_columns:
+        - "Optimisation response - one improvement"
+        - "Why improvement would help"
+
+quality:
+  min_tokens: 4                # too_short threshold
+  near_duplicate_min_len: 20    # chars, exempts short generic answers
+
+embed:
+  backend: "azure"                # "api" | "azure" | "local"
+  model_name: "text-embedding-3-large"   # used for cache-key + local backend only
+
+  # --- backend: "api" (generic OpenAI-compatible endpoint, e.g. DashScope) ---
+  api_base: ""                   # e.g. https://your-dashscope-or-proxy/v1 ; falls back to $QWEN_API_BASE
+  api_key_env: "QWEN_API_KEY"
+
+  # --- backend: "azure" (Azure OpenAI / Azure AI Foundry) ---
+  # These are the EMBEDDING-SPECIFIC credential env var names. They are
+  # intentionally separate from the GPT credentials under
+  # features.llm_calibration below — the embedding backend never reads
+  # or falls back to the GPT endpoint/key, and vice versa.
+  #
+  # CONFIRMED ACTUAL DEPLOYMENT: "IPD-text-embedding-3-large", native dim
+  # 3072. Qwen3-Embedding-8B was never actually deployed for this project
+  # — an earlier "locked" note to that effect was stale. If .env sets
+  # AZURE_EMBEDDING_DEPLOYMENT, pipeline.py lets that override this value
+  # at runtime (see run_feature_pipeline) — keep both in sync.
+  azure_deployment: "IPD-text-embedding-3-large"   # <-- your Azure embedding deployment name (exact)
+  azure_api_version: "2024-06-01"
+  azure_endpoint_env: "AZURE_EMBEDDING_ENDPOINT"   # env var holding the embedding resource endpoint
+  azure_api_key_env: "AZURE_EMBEDDING_API_KEY"     # env var holding the embedding API key
+  # CONFIRM THIS against the deployment's Consume tab before running:
+  #   endpoint looks like https://<resource>.openai.azure.com            -> "deployment"
+  #   endpoint looks like https://<resource>.services.ai.azure.com/openai/v1 -> "v1"
+  azure_api_style: "deployment"    # "deployment" -> AzureOpenAI client (bare resource endpoint,
+                                     #   e.g. https://<resource>.openai.azure.com); SDK builds the
+                                     #   /openai/deployments/<name>/embeddings route itself.
+                                     # "v1" -> OpenAI-compatible client, endpoint normalized to end in
+                                     #   exactly "/openai/v1/" (Azure AI Foundry's v1 route).
+                                     # Never mix the two — see embed.py docstring.
+
+  output_dim: 3072                # text-embedding-3-large's native dimension — no MRL/Matryoshka
+                                    # truncation is applied here since output_dim == native dim.
+                                    # If you deliberately want a smaller stored vector, you can set
+                                    # this below 3072 and truncation will apply; the pipeline fails
+                                    # loudly if this is ever set ABOVE the native dimension.
+                                    # Validated at runtime against the deployment's actual returned
+                                    # dimension — if output_dim > native dim, the pipeline fails loudly.
+  batch_size: 16
+  max_retries: 5
+  backoff_base_s: 1.5
+  cache_path: "data/cache/embeddings.parquet"
+
+features:
+  run_anchors: true
+  run_discovery: true
+  run_llm_calibration: false     # opt-in; costs OpenAI $, small sample only
+
+  # ---------------------------------------------------------------------
+  # theme_construct_map: which ONE Theme (from segment.themes above) each
+  # construct is scored against. This enforces one-question-one-construct
+  # — a construct is never compared against every theme and averaged, so
+  # you get exactly one score per construct per respondent x ad, not a
+  # 4-theme matrix.
+  #
+  # Every construct in `anchors` below that has enabled: true MUST have
+  # an entry here, or the pipeline raises at startup.
+  #
+  # ASSUMPTION FLAGGED FOR REVIEW: the mapping below is my best guess at
+  # which question each construct naturally belongs to (e.g. Enjoyment /
+  # emotional constructs -> Emotion theme; Branding -> Memory theme;
+  # everything else -> Meaning theme). This is domain judgement about
+  # your specific questionnaire, not something I can verify from the
+  # data — check it against your actual question wording and correct any
+  # construct -> theme pairing that's wrong before trusting scores.
+  # ---------------------------------------------------------------------
+  theme_construct_map:
+    enjoyability: Emotion
+    emotional_valence: Emotion
+    authenticity: Emotion
+    nostalgia: Emotion
+    relevance: Meaning
+    persuasion: Meaning
+    confusion_clarity: Meaning
+    scepticism: Meaning
+    personal_relevance: Meaning
+    narrative_coherence: Meaning
+    distinctiveness: Meaning
+    branding: Memory
+    brand_product_linkage: Memory
+
+  discovery:
+    n_neighbors: 15
+    min_dist: 0.0
+    umap_dim: 5
+    min_cluster_size: 8
+
+  llm_calibration:
+    use_azure: true               # true -> calls azure_deployment below; false -> calls OpenAI directly with `model`
+    model: "gpt-5-mini"                # used only if use_azure: false
+    azure_deployment: "gpt-5-mini"   # <-- your Azure GPT chat deployment name (exact)
+    azure_api_version: "2024-06-01"
+    # GPT-SPECIFIC credential env var names — separate from the
+    # embedding credentials above. Only read/validated when
+    # run_llm_calibration is true; a predict run with calibration off
+    # never requires these to be set.
+    azure_endpoint_env: "AZURE_GPT_ENDPOINT"
+    azure_api_key_env: "AZURE_GPT_API_KEY"
+    sample_size: 30
+    constructs:                  # which anchor constructs to spot-check
+      - "enjoyability"
+      - "authenticity"
+
+  # 5-10 paraphrase anchor phrases per construct. Averaged into one
+  # centroid per construct, then cosine-compared against every segment
+  # belonging to that construct's mapped theme (theme_construct_map
+  # above) only.
+  #
+  # Set `enabled: false` on any construct to drop it from scoring
+  # entirely (e.g. this client doesn't want a Nostalgia readout) without
+  # deleting its phrase list — flip it back to true later with no data
+  # loss.
+  anchors:
+    # --- LINK core dimensions ---
+    enjoyability:
+      enabled: true
+      phrases:
+        - "I really enjoyed watching this ad"
+        - "This ad was fun and entertaining to watch"
+        - "Watching this made me smile, I liked it"
+        - "It was an enjoyable, likeable ad"
+        - "I had a good time watching this commercial"
+        - "This ad was pleasant and satisfying to watch"
+        - "I found this ad delightful"
+
+    relevance:
+      enabled: true
+      phrases:
+        - "This ad is relevant to my life"
+        - "It speaks to something I actually care about"
+        - "This felt relevant to people like me"
+        - "The ad connects with my own situation"
+        - "This is about something that matters to me personally"
+        - "I could relate to what the ad was showing"
+
+    persuasion:
+      enabled: true
+      phrases:
+        - "This ad makes me want to buy the product"
+        - "It convinced me to consider this brand"
+        - "After watching, I'm more likely to purchase it"
+        - "The ad gave me a good reason to choose this brand"
+        - "This made me want to try the product"
+        - "I feel persuaded to switch to this brand"
+
+    branding:
+      enabled: true
+      phrases:
+        - "The brand was clear and memorable in this ad"
+        - "I can easily tell which brand this ad is for"
+        - "The branding stood out strongly throughout"
+        - "It's obvious this ad belongs to this specific brand"
+        - "The brand name and logo were well integrated"
+        - "This ad is clearly and distinctly branded"
+
+    # --- Diagnostics beyond LINK's core dimensions ---
+    confusion_clarity:
+      enabled: true
+      phrases:
+        - "I was confused about what this ad was trying to say"
+        - "It wasn't clear what the message was"
+        - "I didn't understand what was going on"
+        - "The story was hard to follow"
+        - "I'm not sure what point the ad was making"
+        - "The message felt muddled or unclear"
+
+    scepticism:
+      enabled: true
+      phrases:
+        - "This ad felt like it was trying too hard"
+        - "It came across as forced or fake"
+        - "The ad felt overly staged and unnatural"
+        - "It seemed like a gimmick rather than genuine"
+        - "This felt manipulative or overly salesy"
+        - "It tried too hard to be emotional or clever"
+
+    authenticity:
+      enabled: true
+      phrases:
+        - "This ad felt genuine and real"
+        - "It came across as honest and authentic"
+        - "The story felt true to life, not staged"
+        - "This felt like a sincere, believable moment"
+        - "The ad felt natural rather than scripted"
+        - "It rang true and didn't feel fake"
+
+    personal_relevance:
+      enabled: true
+      phrases:
+        - "This ad feels like it's about people like me"
+        - "I saw myself in the people in this ad"
+        - "This represents someone from my community or background"
+        - "The people in the ad reminded me of myself or my family"
+        - "This felt made specifically for someone like me"
+
+    narrative_coherence:
+      enabled: true
+      phrases:
+        - "The story had a clear beginning, middle and end"
+        - "The ad told a coherent, easy-to-follow story"
+        - "Everything in the ad connected logically"
+        - "The plot made sense from start to finish"
+        - "The story flowed naturally and made sense"
+
+    emotional_valence:
+      enabled: true
+      phrases:
+        - "This ad made me feel happy and positive"
+        - "It evoked strong warm emotions in me"
+        - "I felt moved and touched watching this"
+        - "The ad stirred up positive feelings"
+        - "It made me feel good emotionally"
+
+    brand_product_linkage:
+      enabled: true
+      phrases:
+        - "The product was clearly tied to the brand story"
+        - "It was obvious how the product fits into the brand's identity"
+        - "The brand and the product felt tightly connected"
+        - "I could clearly see the product being used in a brand context"
+        - "The ad linked the product benefit directly to the brand"
+
+    nostalgia:
+      enabled: true
+      phrases:
+        - "This ad reminded me of my childhood or the past"
+        - "It felt nostalgic, like something from years ago"
+        - "This brought back old memories for me"
+        - "It had a nostalgic, throwback feeling"
+        - "The ad felt like a callback to an earlier, simpler time"
+
+    distinctiveness:
+      enabled: true
+      phrases:
+        - "This ad felt different from other ads I've seen"
+        - "It stood out as unique compared to competitors"
+        - "I haven't seen an ad quite like this before"
+        - "This felt fresh and distinctive"
+        - "It was memorable because it was so different"
+
+# ---------------------------------------------------------------------------
+# Output scale. Anchor-cosine scores ALWAYS land on [0, 1] by default —
+# that rescale from raw cosine [-1, 1] is automatic and not configurable.
+#
+# calibration is an OPTIONAL further linear stretch of that 0-1 score to
+# a client-facing range (e.g. 0-10, 0-100). It is OFF by default. To turn
+# it on: set enabled: true and fill in range.min / range.max. Leaving it
+# off means every score you see anywhere is on 0-1.
+# ---------------------------------------------------------------------------
+scoring:
+  calibration:
+    enabled: false
+    range:
+      min: 0
+      max: 10
+
+aggregate:
+  exclude_quarantined: true
+
+model:
+  labels_path: "data/labels.csv"     # required only in --mode train
+  ad_id_col: "Ad ID"
+  band_col: "LINK_band"
+  score_col: "LINK_score"             # optional; omit column in file if unavailable
+  model_name: "random_forest"          # "random_forest" | "gradient_boosting" | "xgboost"
+  n_splits: 5
+  n_conversations_grid: [5, 10, 20, 30, 50]
+  n_repeats: 5
+
+output:
+  output_dir: "data/outputs"
+  ad_features_filename: "ad_level_features.csv"
+  respondent_features_filename: "respondent_level_features.csv"
+  qc_report_filename: "qc_report.csv"
+  topic_labels_filename: "topic_labels.json"
+  llm_calibration_filename_json: "llm_calibration_report.json"
+  llm_calibration_filename_csv: "llm_calibration_report.csv"
+  model_report_filename: "model_report.json"
